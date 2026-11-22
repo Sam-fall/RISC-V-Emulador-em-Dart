@@ -1,18 +1,54 @@
-class ControlUnit() {
+import 'Ula.dart';
+
+class ControlUnit {
   
-  bool ulaSrcA = false; // false = rs1 | true = PC (para AUIPC)
-  bool ulaSrcB = false; // false = rs2 | true = Imediato (seu antigo ulaSrc)
-  bool regWrite = false; // Permissão para gravar no rd
-  bool memRead = false; // Permissão para ler da RAM
-  bool memWrite = false; // Permissão para gravar na RAM
-  bool branch = false; // Instrução de salto condicional (Tipo-B)
-  bool jump = false; // Salto incondicional (JAL / JALR)
-  bool isJalr = false; // Diferencia JAL (PC + imm) de JALR (rs1 + imm)
+  //Sinais de entrada mux de escrita para o banco de registradores
+  static const int RESULT_ULA = 0;
+  static const int RESULT_MEM = 1;
+  static const int RESULT_PC4 = 2;
+  static const int RESULT_IMM = 3;
+  static const int RESULT_RS1 = 4; //Leva rs1 direto para rd (usado no CMOV)
+
+  bool ulaSrcA = false;   // false = rs1 | true = PC (para AUIPC)
+  bool ulaSrcB = false;   // false = rs2 | true = Imediato (seu antigo ulaSrc)
+  bool regWrite = false;  // Permissão para gravar no rd
+  bool memRead = false;   // Permissão para ler da RAM
+  bool memWrite = false;  // Permissão para gravar na RAM
+  bool branch = false;    // Instrução de salto condicional (Tipo-B)
+  bool jump = false;      // Salto incondicional (JAL / JALR)
+  bool isJalr = false;    // Diferencia JAL (PC + imm) de JALR (rs1 + imm)
+  bool isCmov = false; // Habilita escrita condicional no rd (apenas se rs2 != 0)
+
+  int resultSrc = RESULT_ULA;
+  int ulaOp     = Ula.OP_ADD; // Exposto para a ULA avaliar qual operação realizar
+  int funct3    = 0;          // Exposto para a CPU avaliar Branch e tamanho de Load/Store
+
+  void _resetarSinais() {
+    ulaSrcA   = false;
+    ulaSrcB   = false;
+    regWrite  = false;
+    memRead   = false;
+    memWrite  = false;
+    branch    = false;
+    jump      = false;
+    isJalr    = false;
+    isCmov    = false;
+    resultSrc = RESULT_ULA;
+    ulaOp     = Ula.OP_ADD;
+    funct3    = 0;
+  }
 
   void Opcode(int instruction){  
+    _resetarSinais();
     int opcode = instruction & 0x7F;
+    funct3 = (instruction >> 12) & 0x7;
 
     switch (opcode) {
+
+      case 0x0B: // Instrução escolhida pelo Prof. CMOV
+        tipoR_CMOV();
+        break;
+
       case 0x37: { // Tipo-U LUI (Load Upper Immediate)
        
         tipoU_LUI();
@@ -96,19 +132,33 @@ class ControlUnit() {
     }
   }   
 
-  void tipoU_LUI(){
-    print("lui");
-
+  void tipoR_CMOV() {
+    print("Tipo R (Custom) - cmov, copia rs1 para rd somente se rs2 != 0.");
+    regWrite  = true;       // Intenção de gravar no rd (filtrada pela condição na CPU)
+    isCmov    = true;       // Avisa a CPU para checar se rs2 != 0 antes de gravar
+    resultSrc = RESULT_RS1; // MUX de Write-Back seleciona o valor de rs1 direto
   }
 
-  void tipoU_AUIPC(){
-    print("auipc");
-
+ void tipoU_LUI() {
+    print("Tipo U - lui, usado para carregar um imediato de 20 bits no registrador de destino (rd).");
+    regWrite = true;        // Libera gravação no rd
+    resultSrc = RESULT_IMM; // MUX de Write-Back seleciona o imediato puro do ImmGen
   }
 
-  void tipoJ(){
-    print("jal");
+  void tipoU_AUIPC() {
+    print("Tipo U - auipc, usado para adicionar um imediato de 20 bits ao PC e armazenar o resultado no registrador de destino (rd).");
+    ulaSrcA = true;         // Entrada A da ULA recebe o PC (em vez de rs1)
+    ulaSrcB = true;         // Entrada B da ULA recebe o imediato
+    regWrite = true;        // Libera gravação no rd
+    resultSrc = RESULT_ULA; // MUX de Write-Back seleciona o resultado da ULA
+    ulaOp = Ula.OP_ADD;     // ULA calcula PC + imm
+  }
 
+  void tipoJ() {
+    print("Tipo J - jal, usado para saltar para PC + imediato e salvar PC + 4 em rd.");
+    jump = true;            // Salto incondicional (novo PC será PC + imm)
+    regWrite = true;        // Libera gravação no rd
+    resultSrc = RESULT_PC4; // MUX de Write-Back seleciona PC + 4
   }
 
   void tipoI_JALR(int funct3) {
@@ -116,338 +166,373 @@ class ControlUnit() {
       
       // jalr 
       case 0x00: {
-        print("jalr");
+        print("Tipo I - jalr, usado para saltar para (rs1 + imediato) & ~1 e salvar PC + 4 em rd.\n O bit menos significativo do endereço de destino é forçado a 0 para garantir alinhamento & ~1.");
+        jump = true;            // Salto incondicional
+        isJalr = true;          // Avisa a CPU que o novo PC vem da ULA, não de PC + imm
+        ulaSrcB = true;         // Entrada B da ULA recebe o imediato (Entrada A já é rs1)
+        ulaOp = Ula.OP_ADD;     // ULA calcula rs1 + imm
+        regWrite = true;        // Libera gravação no rd
+        resultSrc = RESULT_PC4; // MUX de Write-Back seleciona PC + 4
         break;
       }
 
       default:
         throw Exception("Funct3 desconhecido ou instrução invalida para Tipo-I JALR: $funct3");
     }
-
   }
   
   void tipoI_LOADS(int funct3) {
+    ulaSrcB = true;         // Entrada B da ULA recebe o imediato (calcula endereço: rs1 + imm)
+    ulaOp = Ula.OP_ADD;     // ULA soma base + deslocamento
+    memRead = true;         // Libera leitura da Memória RAM
+    regWrite = true;        // Libera gravação no rd
+    resultSrc = RESULT_MEM; // MUX de Write-Back seleciona o dado vindo da RAM
+
     switch (funct3) {
-      
-      // lb 
+      // lb
       case 0x0: {
-        print("lb");
+        print("Tipo I - lb, lê 1 byte da RAM (rs1 + imm) com extensão de sinal e salva em rd.");
         break;
       }
-      
-      // lh 
+
+      // lh
       case 0x1: {
-        print("lh");
+        print("Tipo I - lh, lê 2 bytes da RAM (rs1 + imm) com extensão de sinal e salva em rd.");
         break;
       }
-      
-      // lw 
+
+      // lw
       case 0x2: {
-        print("lw");
+        print("Tipo I - lw, lê 4 bytes (word) da RAM (rs1 + imm) e salva em rd.");
         break;
       }
-      
-      // lbu 
+
+      // lbu
       case 0x4: {
-        print("lbu");
+        print("Tipo I - lbu, lê 1 byte da RAM (rs1 + imm) sem sinal (zero-extended) e salva em rd.");
         break;
       }
-      
-      // lhu 
+
+      // lhu
       case 0x5: {
-        print("lhu");
+        print("Tipo I - lhu, lê 2 bytes da RAM (rs1 + imm) sem sinal (zero-extended) e salva em rd.");
         break;
       }
 
       default:
         throw Exception("Funct3 desconhecido ou instrução invalida para Tipo-I Loads: $funct3");
     }
-
   }
 
-  void tipoI_ARITHMETIC_LOGIC(int funct7,int funct3) {
-  switch (funct3) {
-    
-    //addi
-    case 0x0: {
-      print("addi");
-      break;
-    }
-    
-    //slli
-    case 0x1: {
-      // No SLLI, a quantidade de shift (shamt) são apenas os 5 bits inferiores do imediato
-      //int shamt = imm11_0 & 0x1F;
-      print("slli");
-      break;
-    }
-    
-    //slti
-    case 0x2: { 
-      print("slti");
-      break;
-    }
-    
-    //sltiu
-    case 0x3: {
-      print("sltiu");
-      break;
-    }
-    
-    //xori
-    case 0x4: { 
-      print("xori");
-      break;
-    }
-    
-    //srli srai
-    case 0x5: { 
-      
-      if (funct7 == 0x00) {     
-        print("srli"); 
-        break;
-      } else if (funct7 == 0x20) { 
-        print("srai"); 
+  void tipoI_ARITHMETIC_LOGIC(int funct7, int funct3) {
+    ulaSrcB = true;         // Entrada B da ULA recebe o imediato (Entrada A já é rs1)
+    regWrite = true;        // Libera gravação no rd
+    resultSrc = RESULT_ULA; // MUX de Write-Back seleciona o resultado da ULA
+
+    switch (funct3) {
+      // addi
+      case 0x0: {
+        print("Tipo I - addi, soma rs1 com imediato e salva em rd.");
+        ulaOp = Ula.OP_ADD; // ULA calcula rs1 + imm
         break;
       }
-      
-      throw Exception("Instrução de shift inválida. Funct7_imm incorreto: 0x${funct7.toRadixString(16)}");
-    }
-    
-    //ori
-    case 0x6: {
-      print("ori");
-      break;
-    }
-    
-    //andi
-    case 0x7: {
-      print("andi");
-      break;
-    }
-    
-    default:
-      throw Exception("Funct3 desconhecido ou instrução invalida para Tipo-I Aritmético: $funct3");
-  }
-  
-}
 
-  void tipoI_FENCE(int funct3) {
-  switch (funct3) {
+      // slli
+      case 0x1: {
+        print("Tipo I - slli, desloca rs1 à esquerda pelos 5 bits inferiores do imediato e salva em rd.");
+        ulaOp = Ula.OP_SLL; // ULA calcula rs1 << (imm & 0x1F)
+        break;
+      }
 
-    //fence    
-    case 0x0: {
-      print("fence");
-      break;
-    }
-    
-    // fence.i
-    case 0x1: {
-      print("fence.i");
-      break;
-    }
-    
-    default:
-      throw Exception("Funct3 desconhecido ou instrução invalida para Tipo-I Fence: $funct3");
-  }
-  
-}
+      // slti
+      case 0x2: {
+        print("Tipo I - slti, compara rs1 < imediato (com sinal) e salva 1 ou 0 em rd.");
+        ulaOp = Ula.OP_SLT; // ULA compara com sinal
+        break;
+      }
 
-  void tipoI_EVERINMENT_CSR( int funct12, int funct3) {
-    switch (funct3) {
-      
-      // ecall, ebreak
-      case 0x00: {
-        if (funct12 == 0x00) {
-          print("ecall");
+      // sltiu
+      case 0x3: {
+        print("Tipo I - sltiu, compara rs1 < imediato (sem sinal) e salva 1 ou 0 em rd.");
+        ulaOp = Ula.OP_SLTU; // ULA compara sem sinal
+        break;
+      }
+
+      // xori
+      case 0x4: {
+        print("Tipo I - xori, faz XOR bit a bit entre rs1 e imediato e salva em rd.");
+        ulaOp = Ula.OP_XOR; // ULA calcula rs1 ^ imm
+        break;
+      }
+
+      // srli / srai
+      case 0x5: {
+        if (funct7 == 0x00) {
+          print("Tipo I - srli, deslocamento lógico à direita (preenche com 0) e salva em rd.");
+          ulaOp = Ula.OP_SRL; // ULA calcula rs1 >>> (imm & 0x1F)
           break;
-        } else if (funct12 == 0x01) {
-          print("ebreak");
+        } else if (funct7 == 0x20) {
+          print("Tipo I - srai, deslocamento aritmético à direita (mantém sinal) e salva em rd.");
+          ulaOp = Ula.OP_SRA; // ULA calcula rs1 >> (imm & 0x1F)
           break;
         }
-        
+
+        throw Exception("Instrução de shift inválida. Funct7_imm incorreto: 0x${funct7.toRadixString(16)}");
+      }
+
+      // ori
+      case 0x6: {
+        print("Tipo I - ori, faz OR bit a bit entre rs1 e imediato e salva em rd.");
+        ulaOp = Ula.OP_OR; // ULA calcula rs1 | imm
+        break;
+      }
+
+      // andi
+      case 0x7: {
+        print("Tipo I - andi, faz AND bit a bit entre rs1 e imediato e salva em rd.");
+        ulaOp = Ula.OP_AND; // ULA calcula rs1 & imm
+        break;
+      }
+
+      default:
+        throw Exception("Funct3 desconhecido ou instrução invalida para Tipo-I Aritmético: $funct3");
+    }
+  }
+
+  void tipoI_FENCE(int funct3) {
+    // Em um emulador single-cycle/single-core, FENCE atua como NOP (nenhum sinal ativado)
+    switch (funct3) {
+      // fence
+      case 0x0: {
+        print("Tipo I - fence, sincroniza acessos à memória (atua como NOP em single-core).");
+        break;
+      }
+
+      // fence.i
+      case 0x1: {
+        print("Tipo I - fence.i, sincroniza cache de instruções (atua como NOP em single-core).");
+        break;
+      }
+
+      default:
+        throw Exception("Funct3 desconhecido ou instrução invalida para Tipo-I Fence: $funct3");
+    }
+  }
+
+  void tipoI_EVERINMENT_CSR(int funct12, int funct3) {
+    // Sinais permanecem desligados até que um banco de registradores CSR/Syscalls seja implementado
+    switch (funct3) {
+      // ecall, ebreak
+      case 0x00: {
+        if (funct12 == 0x000) {
+          print("Tipo I - ecall, chamada de sistema ao ambiente (OS/Syscall).");
+          break;
+        } else if (funct12 == 0x001) {
+          print("Tipo I - ebreak, pausa a execução para o depurador (breakpoint).");
+          break;
+        }
+
         throw Exception("Instrução de ambiente inválida. funct12 incorreto: 0x${funct12.toRadixString(16)}");
       }
-      
+
       // csrrw
       case 0x01: {
-        print("csrrw");
+        print("Tipo I - csrrw, lê CSR para rd e grava rs1 no CSR.");
         break;
       }
-      
+
       // csrrs
       case 0x02: {
-        print("csrrs");
+        print("Tipo I - csrrs, lê CSR para rd e ativa bits usando máscara de rs1.");
         break;
       }
-      
+
       // csrrc
       case 0x03: {
-        print("csrrc");
+        print("Tipo I - csrrc, lê CSR para rd e limpa bits usando máscara de rs1.");
         break;
       }
-      
+
       // csrrwi
       case 0x05: {
-        print("csrrwi");
+        print("Tipo I - csrrwi, lê CSR para rd e grava imediato de 5 bits no CSR.");
         break;
       }
-      
+
       // csrrsi
       case 0x06: {
-        print("csrrsi");
+        print("Tipo I - csrrsi, lê CSR para rd e ativa bits usando imediato de 5 bits.");
         break;
       }
-      
+
       // csrrci
       case 0x07: {
-        print("csrrci");
+        print("Tipo I - csrrci, lê CSR para rd e limpa bits usando imediato de 5 bits.");
         break;
       }
 
       default:
         throw Exception("Funct3 desconhecido ou instrução invalida para Tipo-I Environment/CSR: $funct3");
     }
-
   }
 
   void tipoB(int funct3) {
+    branch = true;   // Habilita salto condicional (CPU avalia o resultado da ULA + funct3)
+    ulaSrcB = false; // Entrada B da ULA recebe rs2 (compara rs1 com rs2)
+    regWrite = false; // Branches não gravam em registradores
+
     switch (funct3) {
-      
-      // beq 
+      // beq
       case 0x0: {
-        print("beq");
+        print("Tipo B - beq, salta para PC + imm se rs1 == rs2.");
+        ulaOp = Ula.OP_SUB; // ULA calcula rs1 - rs2 (bitflag == true se forem iguais)
         break;
       }
-      
-      // bne 
+
+      // bne
       case 0x1: {
-        print("bne");
+        print("Tipo B - bne, salta para PC + imm se rs1 != rs2.");
+        ulaOp = Ula.OP_SUB; // ULA calcula rs1 - rs2 (bitflag == false se forem diferentes)
         break;
       }
-      
+
       // blt
       case 0x4: {
-        print("blt");
+        print("Tipo B - blt, salta para PC + imm se rs1 < rs2 (com sinal).");
+        ulaOp = Ula.OP_SLT; // ULA retorna 1 se rs1 < rs2
         break;
       }
-      
-      // bge 
+
+      // bge
       case 0x5: {
-        print("bge");
+        print("Tipo B - bge, salta para PC + imm se rs1 >= rs2 (com sinal).");
+        ulaOp = Ula.OP_SLT; // ULA retorna 0 se rs1 >= rs2
         break;
       }
-      
-      // bltu 
+
+      // bltu
       case 0x6: {
-        print("bltu");
+        print("Tipo B - bltu, salta para PC + imm se rs1 < rs2 (sem sinal).");
+        ulaOp = Ula.OP_SLTU; // ULA retorna 1 se rs1 < rs2 (unsigned)
         break;
       }
-      
-      // bgeu 
+
+      // bgeu
       case 0x7: {
-        print("bgeu");
+        print("Tipo B - bgeu, salta para PC + imm se rs1 >= rs2 (sem sinal).");
+        ulaOp = Ula.OP_SLTU; // ULA retorna 0 se rs1 >= rs2 (unsigned)
         break;
       }
 
       default:
         throw Exception("Funct3 desconhecido ou instrução invalida para Tipo-B (Branches): $funct3");
     }
-
   }
 
   void tipoS(int funct3) {
+    ulaSrcB = true;     // Entrada B da ULA recebe o imediato (calcula endereço: rs1 + imm)
+    ulaOp = Ula.OP_ADD; // ULA soma base + deslocamento
+    memWrite = true;    // Libera escrita na Memória RAM (grava o valor de rs2)
+    regWrite = false;   // Stores não gravam no Banco de Registradores
+
     switch (funct3) {
-      
-      // sb 
+      // sb
       case 0x0: {
-        print("sb");
+        print("Tipo S - sb, grava o byte inferior (8 bits) de rs2 na RAM (rs1 + imm).");
         break;
       }
-      
+
       // sh
       case 0x1: {
-        print("sh");
+        print("Tipo S - sh, grava a halfword inferior (16 bits) de rs2 na RAM (rs1 + imm).");
         break;
       }
-      
+
       // sw
       case 0x2: {
-        print("sw");
+        print("Tipo S - sw, grava a word inteira (32 bits) de rs2 na RAM (rs1 + imm).");
         break;
       }
 
       default:
         throw Exception("Funct3 desconhecido ou instrução invalida para Tipo-S: $funct3");
     }
+  }
 
-  } 
+  void tipoR(int funct3, int funct7) {
+    ulaSrcB = false;        // Entrada B da ULA recebe rs2 (Entrada A já é rs1)
+    regWrite = true;        // Libera gravação no rd
+    resultSrc = RESULT_ULA; // MUX de Write-Back seleciona o resultado da ULA
 
-  void tipoR(funct3, int funct7){
-    switch (funct3){
-      //add sub
+    switch (funct3) {
+      // add / sub
       case 0x00: {
-        if(funct7 == 0x20){
-          //sub
-          print("sub");
+        if (funct7 == 0x20) {
+          print("Tipo R - sub, subtrai rs2 de rs1 e salva em rd.");
+          ulaOp = Ula.OP_SUB; // ULA calcula rs1 - rs2
           break;
-
-        } else if(funct7 == 0x00){
-          //add
-          print("add");
+        } else if (funct7 == 0x00) {
+          print("Tipo R - add, soma rs1 com rs2 e salva em rd.");
+          ulaOp = Ula.OP_ADD; // ULA calcula rs1 + rs2
           break;
         }
 
         throw Exception("funct7 desconhecido ou instrução inválida para Tipo-R: ${funct7.toRadixString(16)}");
       }
 
-      //sll
+      // sll
       case 0x01: {
-        print("sll");
+        print("Tipo R - sll, desloca rs1 à esquerda pelos 5 bits inferiores de rs2 e salva em rd.");
+        ulaOp = Ula.OP_SLL; // ULA calcula rs1 << (rs2 & 0x1F)
         break;
       }
 
-      //slt
+      // slt
       case 0x02: {
-        print("slt");
+        print("Tipo R - slt, compara rs1 < rs2 (com sinal) e salva 1 ou 0 em rd.");
+        ulaOp = Ula.OP_SLT; // ULA compara com sinal
         break;
       }
 
-      //sltu
+      // sltu
       case 0x03: {
-        print("sltu");
+        print("Tipo R - sltu, compara rs1 < rs2 (sem sinal) e salva 1 ou 0 em rd.");
+        ulaOp = Ula.OP_SLTU; // ULA compara sem sinal
         break;
       }
 
-      //xor 
+      // xor
       case 0x04: {
-        print("xor");
+        print("Tipo R - xor, faz XOR bit a bit entre rs1 e rs2 e salva em rd.");
+        ulaOp = Ula.OP_XOR; // ULA calcula rs1 ^ rs2
         break;
       }
 
-      //srl sra 
+      // srl / sra
       case 0x05: {
-        if(funct7 == 0x20){
-          //sra
-          print("sra");
+        if (funct7 == 0x20) {
+          print("Tipo R - sra, deslocamento aritmético à direita (mantém sinal) e salva em rd.");
+          ulaOp = Ula.OP_SRA; // ULA calcula rs1 >> (rs2 & 0x1F)
           break;
-        } else if(funct7 == 0x00){
-          //srl
-          print("srl");
+        } else if (funct7 == 0x00) {
+          print("Tipo R - srl, deslocamento lógico à direita (preenche com 0) e salva em rd.");
+          ulaOp = Ula.OP_SRL; // ULA calcula rs1 >>> (rs2 & 0x1F)
           break;
         }
         throw Exception("funct7 desconhecido ou instrução inválida para Tipo-R: ${funct7.toRadixString(16)}");
       }
 
-      //or
+      // or
       case 0x06: {
-        print("or");
+        print("Tipo R - or, faz OR bit a bit entre rs1 e rs2 e salva em rd.");
+        ulaOp = Ula.OP_OR; // ULA calcula rs1 | rs2
         break;
       }
 
-      //and
+      // and
       case 0x07: {
-        print("and");
+        print("Tipo R - and, faz AND bit a bit entre rs1 e rs2 e salva em rd.");
+        ulaOp = Ula.OP_AND; // ULA calcula rs1 & rs2
         break;
       }
 
