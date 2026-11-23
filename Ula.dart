@@ -85,11 +85,3 @@ class Ula {
     bitflag = (resultado == 0);
   }
 }
-
-void main(List<String> args) {
-  var ula = Ula();
-
-
-  ula.executar(11, 21, 0, false, Ula.OP_ADD);
-  print(ula.resultado);
-}

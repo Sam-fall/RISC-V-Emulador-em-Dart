@@ -21,9 +21,3 @@ class Register {
 }
 
 }
-
-void main(List<String> args) {
-  var reg = Register();
-  reg.write(2, 11);
-  print(reg.read(2));
-}
